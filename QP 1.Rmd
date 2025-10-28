@@ -1,0 +1,489 @@
+---
+title: "Angeline QP 1"
+author: "Angeline"
+date: "2025-10-27"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+```{r imputation function}
+library(mice)
+library(nnet)
+library(lme4)
+library(glmmTMB)
+library(broom.mixed)
+load("NLSdata.RData") #pre-cleaned
+```
+
+
+```{r Create the base models for comparison}
+
+#pivoting longitudinal data for model 2 and 4
+longdata = newdata %>%
+  pivot_longer(
+    cols = matches(".*_\\d{4}$"),  # only pivot columns ending in _YYYY
+    names_to = c(".value", "year"),
+    names_pattern = "^(.*)_(\\d{4})$"
+  ) %>%
+  mutate(year = as.integer(year)) %>%
+  arrange(across(any_of(c("ID", "year"))))  
+
+#MODEL 1
+#household size vs household size under 6 in 1997
+ggplot(data = newdata) + geom_jitter(aes(x = CV_HH_SIZE_1997, y = CV_HH_UNDER_6_1997), width = 0.2, height = 0.3, alpha = 0.2) + 
+  labs(x = "Household size in 1997", y = "Number of household members under 6 years in 1997")
+
+MODEL1 = glm(CV_HH_SIZE_1997 ~ CV_HH_UNDER_6_1997, family = "poisson", data = newdata)
+
+summary(MODEL1)
+
+#MODEL 2
+#height vs sex * age #longitudinal model 
+ggplot(data = longdata %>% filter(!is.na(`YHEA-2100`))) + geom_jitter(aes(x = CV_AGE_INT_DATE, y = `YHEA-2100`, colour = KEY_SEX), width = 0.2, height = 0.3, alpha = 0.1)
+
+
+MODEL2 = lmer(`YHEA-2100` ~ KEY_SEX * CV_AGE_INT_DATE + (1 | ID), data = longdata)
+
+summary(MODEL2)
+
+#MODEL 3
+#highest education level based on maths and language credits 
+library(nnet)
+MODEL3 = multinom(CVC_HIGHEST_DEGREE_EVER_XRND ~ TRANS_CRD_GPA_ENGLISH_HSTR + TRANS_CRD_GPA_FGN_LANG_HSTR + TRANS_CRD_GPA_LP_SCI_HSTR + TRANS_CRD_GPA_MATH_HSTR + TRANS_CRD_GPA_SOC_SCI_HSTR, data = newdata)
+summary(MODEL3)
+
+summary(multinom(CVC_HIGHEST_DEGREE_EVER_XRND ~ TRANS_CRD_GPA_MATH_HSTR, data = newdata))
+
+#MODEL 4
+#healthstate vs weight * time
+
+#changing the health state into a binary variable
+longdata = longdata %>% mutate(healthstate =ifelse(
+  `YHEA-100` %in% c("Excellent", "Very good", "Good"), "Good or better",
+   "Fair or worse"))
+
+MODEL4 = glmmTMB(as.factor(healthstate)~ year + `YSAQ-373` + (1|ID), data = longdata, family = binomial)
+summary(MODEL4)
+
+#MODEL 5
+#number of maths credits based on sex and ethnicity 
+MODEL5 = lm(TRANS_TOT_MATH_HSTR ~ KEY_SEX + KEY_RACE_ETHNICITY, data = newdata)
+summary(MODEL5)
+
+#MODEL 6
+#number of english credits based on favourite ice cream flavour in 1997
+MODEL6 = lm(TRANS_CRD_GPA_ENGLISH_HSTR ~ `YSAQ-INTRO-3_1997`, data = newdata)
+summary(MODEL6)
+            
+
+```
+
+```{r}
+#function to induce missingness at random in a dataset for a specific column when 
+add_mar_missingness = function(data, 
+                               target_col, #the column we want to induce missingness in
+                               predictor_cols,  #the column where the missingness at random occurs
+                               missing_rate = 0.3) {
+
+  #create a formula 
+  formula_str = paste(
+    "runif(nrow(data)) < ", missing_rate, " ~ ",
+    paste(predictor_cols, collapse = " + ")
+  )
+
+  formula = as.formula(formula_str)
+
+  # Prepare model data
+  model_data = data[, predictor_cols, drop = FALSE]
+
+  # Convert character columns to factor (for glm)
+  model_data = model_data %>%
+    mutate(across(where(is.character), as.factor))
+
+  # Fit logistic model
+  probs = predict(glm(formula, data = model_data, family = binomial), type = "response")
+
+  # Randomly set target column values to NA based on probability
+  missing_idx = runif(nrow(data)) < probs
+  data[missing_idx, target_col] = NA
+
+  return(data)
+}
+
+#apply the missingness to all columns
+missingdataset = function(data, missing_rate){
+
+# Exclude inducing missingness in the ID variable
+exclude_cols = "ID"
+
+# Get target columns
+target_columns = setdiff(names(data), exclude_cols)
+
+# Number of predictors to use per target 
+num_predictors = 5
+
+# Loop through and apply missingness
+for (target in target_columns) {
+  # Choose predictors except for the target
+  predictors = setdiff(target_columns, target)
+  
+  # Randomly sample predictors
+  if (length(predictors) > num_predictors) {
+    predictors = sample(predictors, num_predictors)
+  }
+  
+  # Apply MAR missingness
+  data = add_mar_missingness(
+    data = data,
+    target_col = target,
+    predictor_cols = predictors,
+    missing_rate = missing_rate
+  )
+  
+}
+return(data)
+}
+
+```
+
+```{r,warning=FALSE}
+#make missing data sets 
+colnames(newdata) = make.names(colnames(newdata), unique = TRUE)
+
+set.seed(12345)
+data0.05 = missingdataset(newdata, 0.05)
+mean(is.na(data0.05))
+
+set.seed(12345)
+data0.1 = missingdataset(newdata, 0.1)
+mean(is.na(data0.1))
+
+set.seed(12345)
+data0.15 = missingdataset(newdata, 0.15)
+mean(is.na(data0.15))
+
+set.seed(12345)
+data0.2 = missingdataset(newdata, 0.2)
+mean(is.na(data0.2))
+
+set.seed(12345)
+data0.25 = missingdataset(newdata, 0.25)
+mean(is.na(data0.25))
+
+set.seed(12345)
+data0.3 = missingdataset(newdata, 0.3)
+mean(is.na(data0.3))
+
+```
+
+```{r}
+#apply the imputation (using a reproducible function)
+missingstudy = function(data, predmx){
+  data = droplevels(data)
+  
+  #create the imputations
+  imp = mice(data, maxit = 10, predictorMatrix = predmx, print = FALSE, seed = 1234, m = 5, ridge = 1e-5, printFlag = TRUE)
+  impcomplete = imp %>% complete(action="long",include=TRUE)
+  impmids = as.mids(impcomplete)
+  
+  #fit model 1
+  model1test = with(impmids, glm(CV_HH_SIZE_1997 ~ CV_HH_UNDER_6_1997, family = "poisson"))
+  
+    #fit model 3
+  model3test = with(impmids, multinom(CVC_HIGHEST_DEGREE_EVER_XRND ~ TRANS_CRD_GPA_ENGLISH_HSTR + TRANS_CRD_GPA_FGN_LANG_HSTR + TRANS_CRD_GPA_LP_SCI_HSTR + TRANS_CRD_GPA_MATH_HSTR + TRANS_CRD_GPA_SOC_SCI_HSTR))
+  
+    #fit model 5
+  model5test = with(impmids, lm(TRANS_TOT_MATH_HSTR ~ KEY_SEX + KEY_RACE_ETHNICITY))
+  
+  #fit model 6
+  model6test = with(impmids, lm(TRANS_CRD_GPA_ENGLISH_HSTR ~ `YSAQ.INTRO.3_1997`))
+  
+  #pivot the dataset for models 2 and 4
+  working.continous = list()
+for(i in 0:max(impcomplete$.imp)) {
+  working.continous[[i+1]] = 
+    impcomplete %>%
+    subset(.imp == i) %>%
+  pivot_longer(
+    cols = matches(".*_\\d{4}$"),  # only pivot columns ending in _YYYY
+    names_to = c(".value", "year"),
+    names_pattern = "^(.*)_(\\d{4})$"
+  ) %>%
+  mutate(year = as.numeric(year)) %>%
+  mutate(healthstate =ifelse(
+  `YHEA.100` %in% c("Excellent", "Very good", "Good"), "Good or better",
+   "Fair or worse")) %>%
+  arrange(across(any_of(c("ID", "year")))) %>%
+    mutate(.id = 1:nrow(.)) 
+}
+
+  implong = as.mids(do.call(rbind, working.continous))
+  
+  #fit model 2
+  model2test = with(implong, lmer(`YHEA.2100` ~ KEY_SEX * CV_AGE_INT_DATE + (1 | ID)))
+  
+  #fit model 4
+  model4test = with(implong, glmmTMB(as.factor(healthstate)~ year + `YSAQ.373` + (1|ID), family = binomial))
+  
+
+  return(list(model1test, model2test, model3test, model4test, model5test, model6test))
+  
+}
+```
+
+```{r names}
+#for variable name data cleaning for creating the prediction matrices
+names = names(newdata)
+
+ageN = names[which(names == "CV_AGE_INT_DATE_1997"):which(names == "CV_AGE_INT_DATE_2011")]
+
+hhsizeN = names[which(names == "CV_HH_SIZE_1997"):which(names ==  "CV_HH_UNDER_6_2011")]
+
+educationN = c("CVC_HIGHEST_DEGREE_EVER_XRND", names[which(names == "TRANS_ACAD_CONC_HSTR"):which(names == "TRANS_TOT_MATH_HSTR")])
+
+demographicsN = c("KEY_SEX", "KEY_RACE_ETHNICITY", "KEY_BDATE_Y")
+
+healthN = names[which(names == "YHEA.100_1997"):which(names ==  "YHEA.2100_2001")]
+
+heightweightN = names[which(names == "YHEA.2100_1999"):which(names ==  "YSAQ.374_2011")]
+
+randomN = names[!names %in% c(ageN, hhsizeN, educationN, demographicsN, healthN, heightweightN)]
+
+```
+
+```{r predmatrix}
+
+#create the prediction matrices for the 5 models outlined in the report
+predmatrix1 = make.predictorMatrix(newdata)
+predmatrix1[] = 0 
+
+agematrix = predmatrix1[ageN, ageN]
+
+agematrix[row(agematrix) == col(agematrix) + 1 |
+              row(agematrix) + 1 == col(agematrix)] = 1
+
+hhmatrix = predmatrix1[hhsizeN, hhsizeN]
+
+hhmatrix[row(hhmatrix) == col(hhmatrix) + 1 |
+              row(hhmatrix) + 1 == col(hhmatrix)] = 1
+
+predmatrix1[hhsizeN, hhsizeN]  = hhmatrix
+
+predmatrix1[educationN, educationN] = 1
+
+predmatrix1[demographicsN, c(demographicsN, educationN, healthN, heightweightN, hhsizeN)] = 1
+
+predmatrix1[c(demographicsN, educationN, healthN, heightweightN, hhsizeN), demographicsN] = 1
+
+
+predmatrix1[healthN, healthN] = 1
+predmatrix1[heightweightN, heightweightN] = 1
+
+predmatrix2 = predmatrix1
+
+#making a function to find the year of variables so that entries with the same year can be set as 1 for imputation assumption 1
+extract_year = function(x) {
+  year = sub(".*_(\\d{4})$", "\\1", x)
+  year[!grepl("_(\\d{4})$", x)] = NA   
+  return(year)
+}
+
+row_years = extract_year(rownames(predmatrix1))
+col_years = extract_year(colnames(predmatrix1))
+
+# Create matrix = T if both years exist and are equal
+matches = outer(row_years, col_years, FUN = function(r, c) !is.na(r) & r == c)
+
+# assign 1 to all true values from the line above
+predmatrix1[matches] = 1
+
+predmatrix1["ID", ] = 0 
+predmatrix1[, "ID"] = 0 
+
+
+diag(predmatrix1) = 0 
+```
+
+```{r predmatrix2}
+
+#prediction matrix 2 is same as 1 but without the longitudinal structure
+predmatrix2["ID", ] = 0 
+predmatrix2[, "ID"] = 0 
+
+#prediction matrix 3
+predmatrix3 = make.predictorMatrix(data0.1)
+predmatrix3[] = 0
+
+predmatrix3["ID", ] = 0 
+predmatrix3[, "ID"] = 0 
+
+#pred matrix 3
+#randomly sampling 30 columns for prediction
+for (i in 1:nrow(predmatrix3)) {
+  predmatrix3[i, sample(ncol(predmatrix3), 30)] = 1
+}
+diag(predmatrix3) = 0 
+
+#pred matrix 4
+#randomly sampling 5 columns for prediction
+predmatrix4 = make.predictorMatrix(data0.1)
+predmatrix4[] = 0
+
+
+predmatrix4["ID", ] = 0 
+predmatrix4[, "ID"] = 0 
+
+for (i in 1:nrow(predmatrix4)) {
+  predmatrix4[i, sample(ncol(predmatrix4), 5)] = 1
+}
+diag(predmatrix4) = 0 
+
+#pred matrix 5
+#make the 'random columns' predict everything
+predmatrix5 = make.predictorMatrix(data0.1)
+predmatrix5[] = 0 
+predmatrix5[, randomN] = 1
+diag(predmatrix5) = 0 
+predmatrix5["ID", ] = 0 
+predmatrix5[, "ID"] = 0 
+
+```
+
+
+```{r sims, warning=FALSE}
+#apply all the functions for simulations
+
+imp0.05 = missingstudy(data0.05, predmatrix1)
+imp0.1 = missingstudy(data0.1, predmatrix1)
+imp0.15 = missingstudy(data0.15, predmatrix1)
+imp0.2 = missingstudy(data0.2, predmatrix1)
+imp0.25 = missingstudy(data0.25, predmatrix1)
+imp0.3 = missingstudy(data0.3, predmatrix1)
+
+
+impmis1 = imp0.1
+impmis2 = missingstudy(data0.1, predmatrix2)
+impmis3 = missingstudy(data0.1, predmatrix3)
+impmis4 = missingstudy(data0.1, predmatrix4)
+impmis5 = missingstudy(data0.1, predmatrix5)
+
+#save.image("Imputations.RData")
+```
+
+```{r}
+models = list(MODEL1, MODEL2, MODEL3, MODEL4, MODEL5, MODEL6)
+vcov_fixed = function(model) {
+  as.matrix(vcov(model)$cond) 
+}
+
+#function for analysing the simulation by comparing it to the models fit on the complete data
+comparison = function(imputation){
+  MSE = matrix(NA, nrow = 6, ncol = 3)
+  rownames(MSE) = 1:6
+  colnames(MSE) = c("MSE_Q", "MSE_U", "MSE_T")
+  #the models with the same model output structure (models 2, 3 and 4 have weird syntax that needs to be hard coded due to the use of the lmer, glmmTMB and nnet packages)
+  for (i in c(1, 5:6)){
+      pooled = pool(imputation[[i]])
+      MSE[i, 1] = mean((models[[i]]$coefficients - getqbar(pooled))^2)
+      ubar = Reduce("+", lapply(imputation[[i]]$analyses, vcov)) / 5
+      MSE[i,2] =  mean((vcov(models[[i]]) - ubar)^2)
+      b = pooled$pooled$b
+      t = ubar + (1 + 1 / 5) * b  
+      MSE[i,3] = mean((vcov(models[[i]]) - t)^2)
+
+  }
+  
+  
+  #comparing model 4
+  pooled = pool(imputation[[4]])
+   MODEL4coef = MODEL4[["fit"]][["par"]][-length(MODEL4[["fit"]][["par"]])]
+   MSE[4,1] = mean((MODEL4coef - getqbar(pooled))^2)
+   ubar = Reduce("+", lapply(imputation[[4]]$analyses, vcov_fixed)) / 5
+    MSE[4,2] =  mean((vcov(models[[4]])$cond - ubar)^2)
+    b = pooled$pooled$b
+    t = ubar + (1 + 1 / 5) * b  
+    MSE[4,3] = mean((vcov(models[[4]])$cond  - t)^2)
+  
+    #comparing model 2
+   pooled = pool(imputation[[2]])
+   MSE[2,1] = mean((MODEL2@beta - getqbar(pooled))^2)
+   ubar = Reduce("+", lapply(imputation[[2]]$analyses, vcov)) / 5
+    MSE[2,2] =  mean((vcov(models[[2]]) - ubar)^2)
+    b = pooled$pooled$b
+    t = ubar + (1 + 1 / 5) * b  
+    MSE[2,3] = mean((vcov(models[[2]]) - t)^2)
+    
+    #comparing model 3
+    pooled = pool(imputation[[3]])
+    qbar = t(matrix(getqbar(pooled), nrow = 6, ncol = 7))
+   MSE[3,1] = mean((coef(MODEL3) - qbar)^2)
+   ubar = Reduce("+", lapply(imputation[[3]]$analyses, vcov)) / 5
+    MSE[3,2] =  mean((vcov(models[[3]]) - ubar)^2) 
+    b = pooled$pooled$b
+    t = ubar + (1 + 1 / 5) * b  
+    MSE[3,3] = mean((vcov(models[[3]]) - t)^2)
+    
+    return(MSE)
+
+
+}
+
+#putting results into a matrix 
+missinganalysis = cbind(comparison(imp0.05), comparison(imp0.1), comparison(imp0.15), comparison(imp0.2), comparison(imp0.25), comparison(imp0.3))
+
+misspecanalysis = cbind(comparison(impmis1), comparison(impmis2), comparison(impmis3), comparison(impmis4), comparison(impmis5))
+
+#seperating out the tables for plotting
+MSEQmissing = missinganalysis[, seq(1, ncol(missinganalysis), by = 3)]  # columns 1, 4, 7, 10, 13
+MSEUmissing = missinganalysis[, seq(2, ncol(missinganalysis), by = 3)]  # columns 2, 5, 8, 11, 14
+MSETmissing = missinganalysis[, seq(3, ncol(missinganalysis), by = 3)]  # columns 3, 6, 9, 12, 15
+
+
+MSEQmisspec= misspecanalysis[, seq(1, ncol(misspecanalysis), by = 3)]  # columns 1, 4, 7, 10, 13
+MSEUmisspec = misspecanalysis[, seq(2, ncol(misspecanalysis), by = 3)]  # columns 2, 5, 8, 11, 14
+MSETmisspec = misspecanalysis[, seq(3, ncol(misspecanalysis), by = 3)]  # columns 3, 6, 9, 12, 15
+
+
+```
+
+```{r}
+#plots
+plotMSE = function(data, varnamex = "Missingness proportion", varnamey = "log(MSE Q)", title, miss = F){
+  
+  data = as.data.frame(data)
+  
+if(miss == T){
+  colnames(data) = c("0.05", "0.1", "0.15", "0.2", "0.25", "0.3")
+} else{colnames(data) = c("1","2","3","4","5")}
+data$Model = 1:6
+
+df_long = data %>%
+  pivot_longer(
+    cols = -Model,
+    names_to = "c",
+    values_to = "MSE"
+  )
+
+df_long$c = as.numeric(df_long$c)
+
+ggplot(df_long, aes(x = c, y = log(MSE), color = factor(Model))) +
+  geom_line() +
+  geom_point() +
+  labs(x = varnamex, y = varnamey, color = "Model", title = title) +
+  theme_minimal()
+}
+
+plotMSE(MSEQmissing, varnamey = "log(MSE Q)", title = "MSE of Q for increasing levels of missingness", miss = T)
+plotMSE(MSEUmissing, varnamey = "log(MSE U)", title = "MSE of U for increasing levels of missingness", miss = T)
+plotMSE(MSETmissing, varnamey = "log(MSE T)", title = "MSE of T for increasing levels of missingness", miss = T)
+
+
+plotMSE(MSEQmisspec, varnamey = "log(MSE Q)",  varnamex = "Imputation Assumption", title = "MSE of Q for different imputation prediction assumptions")
+plotMSE(MSEUmisspec, varnamey = "log(MSE U)", varnamex = "Imputation Assumption", title = "MSE of U for different imputation prediction assumptions")
+plotMSE(MSETmisspec, varnamey = "log(MSE T)", varnamex = "Imputation Assumption", title =  "MSE of T for different imputation prediction assumptions")
+
+
+```
+
